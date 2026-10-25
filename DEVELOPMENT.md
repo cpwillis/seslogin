@@ -700,6 +700,78 @@ runs will fail with a `ValidationException` that doesn't obviously point at the 
 
 ---
 
+## 10. Dev bar
+
+Under the Vite dev server (`make dev-local`, `make dev`), every page has a faint **</> Dev** tab
+in the bottom-left corner. It opens a panel of shortcuts for the steps §9 otherwise does in the
+console or with a script, one row per kind:
+
+| Row | Control | Does |
+| --- | --- | --- |
+| (header) | `</> dev <rev>` | Build environment and API git rev; **PROD DB** in red if the API is on prod tables |
+| Admin | Super / Unit Admin / Read Only | Restores the seeded tokens (Log out deletes the one it used; `local-seed apply --table user_token`), stores that user's (see [Logging in](#logging-in)), skips the passkey prompt, opens `/admin`; the active one is ringed green |
+| Admin | Passkey Prompt | Shows the passkey enrolment prompt now (on `/admin` pages) |
+| Admin | GraphiQL | Copies your token as GraphiQL headers and opens it (when signed in) |
+| Kiosk | Default | Installs the seeded kiosk key, as `local/examples/kiosk-scan.mjs` does, and opens `/kiosk/default` (TestAKiosk02) |
+| Kiosk | Alice 13h | `period create-signin --hours-ago 13` for Alice at the seeded kiosk; scan `10000001` there to reach the forgot-to-sign-out screen |
+| Kiosk | Needs Reactivation | `cli session edit TestAKiosk02 --require-reactivation`, once confirmed; Reactivate then shows on the admin Kiosks page. Seed: Synthetic undoes it |
+| Data | Seed: Synthetic | `make local-seed`, once confirmed |
+| Data | Clear | `make local-clear`, once confirmed |
+| Data | DB Browser | `dynamodb-admin` on :8101 (Docker route only) |
+| Mail | Last Email | The newest message the mock mailer "sent", in full |
+| Mail | Edit Link | Signs Alice in 1h ago and opens her `/period#…` edit link (`cli period-link issue`), as the Remind email carries |
+| Mail | Summary Preview | Dry-runs `activity-summary` for yesterday and opens the first email as a page. Needs a user subscribed to daily summaries (admin Settings) and activity yesterday |
+| Server | Latency | Cycles 0 / 500ms / 2s / 5s of extra delay on every GraphQL response, like `--response-lag-ms` without the restart |
+| Server | Fail box, Errors Off | Enter targets in `SESLOGIN_FORCE_FIELD_ERRORS` syntax (see [Injecting resolver errors](api/README.md#injecting-resolver-errors)) to fail those fields from now on; Errors Off clears them. The box's hint shows what is failing |
+| Mail | Code | The code from the newest login email, polled every 3s while the panel is open; click to copy |
+| Browser | Theme | Cycles Auto / Light / Dark: pins the page theme (`data-theme` on `<html>`) whatever the OS says, remembered per browser. Not on `/kiosk`, whose theme is set per kiosk in admin |
+| Browser | Reset | Clears this origin's localStorage, sessionStorage and kiosk keys, once confirmed |
+
+The bar remembers whether it was open across page loads. Command output opens in a panel to
+the right of the bar, the same height as the bar and scrolling inside it, ringed red on an
+error; **Copy** puts the whole output on the clipboard and × dismisses it. Destructive controls
+ask for confirmation in that same panel first. Esc cancels a confirmation, or closes the bar
+unless you are typing in a field. Controls that need the `/dev` routes grey out when the API
+lacks them.
+
+The bar is hidden when printing, and in automated browsers (`navigator.webdriver`, which
+Playwright sets), so guide screenshots and `local/examples/` scripts never capture it. It
+carries `data-devbar` for anything else that needs to skip it.
+
+Every Data, Mail and Server control except DB Browser, and every Kiosk control except Default, calls
+`/dev/*` on the API, which only `poem-local` serves
+([api/src/local_dev.rs](api/src/local_dev.rs)), and only when `DB_PREFIX=seslogin_local`
+on a local DynamoDB endpoint; the startup log says whether they are on. Each request must
+come from this machine, and from a local page if it comes from a browser (anything else gets
+a 403: the API listens on every interface, and any site you visit could otherwise post to
+it). Writes run the same `local-seed` and `cli` binaries the `make` targets do, via `cargo
+run`, so the first click after a code change waits for a compile. Under `make dev` they 404,
+and the bar greys them out.
+
+The bar is source in [web/src/dev/DevBar.tsx](web/src/dev/DevBar.tsx), mounted by
+[web/src/App.tsx](web/src/App.tsx) only when `import.meta.env.DEV` is true. That is a
+constant `false` in `vite build`, so no deployed bundle contains the bar, the tokens or the
+kiosk key. The seeded logins only work against `seslogin_local`: under `make dev` they get a
+401, and the kiosk key matches no session. `api/tests/seed_fixtures.rs` fails if a token or
+`Test…` id in the bar stops matching the fixtures.
+
+Three checks keep it that way. `npm run build` (so `make check`, CI and every deploy) fails
+if the bar, a seeded token or the kiosk key reaches `web/dist`. Unit tests in
+`api/src/local_dev.rs` pin the `/dev` guards: mounted only for `seslogin_local` on a local
+endpoint, callers only from this machine and a local page. A third test fails if `poem` or
+the Lambda ever references the dev routes.
+
+Adding a control: only for something a developer can't reach through the app's own UI
+without a convoluted detour (reading a log, a CLI command, waiting hours). Anything a user
+can do or configure normally, eg a kiosk's Who's here setting or logging out, stays out. If
+the browser can do it on its own (storage, navigation, the shared helpers in `web/src/lib/`
+and `web/src/kiosk/lib/`), add it to the bar only. If it touches data, add a route to
+`local_dev::dev_routes` that runs the existing binary, so the bar and the command line share
+one code path. Either way it is one entry in its row of the `GROUPS` list, sharing the bar's
+busy flag and output panel; give a destructive one a `danger` warning to confirm.
+
+---
+
 ## Where to go next
 
 - [README.md](README.md) — project overview, branches, deployments

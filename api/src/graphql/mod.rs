@@ -178,7 +178,7 @@ pub fn build_schema<A: App + HasDb + HasQueues + HasMail + HasRealtime + Send + 
     app: Arc<A>,
     webauthn: Arc<webauthn_rs::prelude::Webauthn>,
 ) -> Schema<QueryRoot<A>, MutationRoot<A>, EmptySubscription> {
-    let mut builder = Schema::build(
+    let builder = Schema::build(
         QueryRoot::new(),
         // TODO: stop passing app into MutationRoot, use .data()
         MutationRoot { app: app.clone() },
@@ -190,11 +190,11 @@ pub fn build_schema<A: App + HasDb + HasQueues + HasMail + HasRealtime + Send + 
 
     // Dev-only resolver error injection. Compiled out of release builds entirely, so
     // it cannot be switched on in any deployed environment — every Lambda is a release
-    // build, and `preprod`/`qa` share the production database.
+    // build, and `preprod`/`qa` share the production database. Always installed in
+    // dev builds so `poem-local`'s dev bar can add targets at runtime.
     #[cfg(debug_assertions)]
-    if let Some(injector) = error_injection::ForceFieldErrors::from_env() {
-        builder = builder.extension(injector);
-    }
+    let builder =
+        builder.extension(error_injection::ForceFieldErrors::from_env().unwrap_or_default());
 
     builder.finish()
 }

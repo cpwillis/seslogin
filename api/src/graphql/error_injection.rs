@@ -44,8 +44,8 @@ use async_graphql::extensions::{
 use async_graphql::{
     PathSegment, QueryPathNode, QueryPathSegment, ServerError, ServerResult, Value,
 };
-use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, RwLock};
 
 const TARGETS_VAR: &str = "SESLOGIN_FORCE_FIELD_ERRORS";
 const BUDGET_VAR: &str = "SESLOGIN_FORCE_FIELD_ERRORS_BUDGET";
@@ -66,6 +66,15 @@ struct Target {
 }
 
 impl Target {
+    /// The target as written: `pattern@rate`.
+    fn spec(&self) -> String {
+        format!(
+            "{}@{}",
+            self.pattern,
+            self.scaled_rate as f64 / RATE_SCALE as f64
+        )
+    }
+
     /// Segment-wise match against an actual response path: same segment count, and
     /// each pattern segment either is `*` or equals the corresponding path segment.
     fn matches(&self, path: &str) -> bool {
@@ -164,6 +173,35 @@ fn path_segments(node: &QueryPathNode) -> Vec<PathSegment> {
     segments
 }
 
+/// Targets set at runtime from the dev bar (`poem-local`'s `/dev/errors`), checked after the env's.
+static RUNTIME_TARGETS: RwLock<Vec<Target>> = RwLock::new(Vec::new());
+
+/// Replace the runtime targets with `raw`, in the env var's syntax; empty clears. Returns how many parsed.
+pub fn set_runtime_targets(raw: &str) -> usize {
+    let targets = parse_targets(raw);
+    let count = targets.len();
+    *RUNTIME_TARGETS.write().unwrap_or_else(|e| e.into_inner()) = targets;
+    count
+}
+
+/// The runtime targets as `pattern@rate`, comma-separated.
+pub fn runtime_targets() -> String {
+    let targets = RUNTIME_TARGETS.read().unwrap_or_else(|e| e.into_inner());
+    targets
+        .iter()
+        .map(Target::spec)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// The first runtime target matching `path`.
+fn runtime_match(path: &str) -> Option<Target> {
+    let targets = RUNTIME_TARGETS.read().unwrap_or_else(|e| e.into_inner());
+    targets.iter().find(|t| t.matches(path)).cloned()
+}
+
+/// No env targets means installed only for the runtime ones.
+#[derive(Default)]
 pub struct ForceFieldErrors {
     targets: Arc<Vec<Target>>,
     /// Remaining failures to inject, or `None` for unlimited.
@@ -201,7 +239,7 @@ impl ForceFieldErrors {
             "ERROR INJECTION ACTIVE: {} will fail{}. This is a dev-only testing aid.",
             targets
                 .iter()
-                .map(|t| format!("{}@{}", t.pattern, t.scaled_rate as f64 / RATE_SCALE as f64))
+                .map(Target::spec)
                 .collect::<Vec<_>>()
                 .join(", "),
             match &budget {
@@ -259,10 +297,22 @@ impl Extension for ForceFieldErrorsExt {
         // unconditionally rather than only after a cheap type/field match — fine,
         // since this whole extension only exists when a developer has explicitly
         // opted in via SESLOGIN_FORCE_FIELD_ERRORS.
+        // Nothing configured is the usual case: skip building a path for every field.
+        if self.targets.is_empty()
+            && RUNTIME_TARGETS
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty()
+        {
+            return next.run(ctx, info).await;
+        }
         let path = info.path_node.to_string();
-        let matched = self.targets.iter().find(|t| t.matches(&path));
+        // Which list matched, named in the error so it can't be mistaken for a real one.
+        let matched = (self.targets.iter().find(|t| t.matches(&path)).cloned())
+            .map(|t| (t, TARGETS_VAR))
+            .or_else(|| runtime_match(&path).map(|t| (t, "the dev bar")));
 
-        if let Some(target) = matched
+        if let Some((target, source)) = matched
             && selected_by_rate(&path, target.scaled_rate)
             && self.claim_budget()
         {
@@ -278,7 +328,7 @@ impl Extension for ForceFieldErrorsExt {
             let pos = info.field.name.pos;
             return Err(ServerError::new(
                 format!(
-                    "Injected error: `{}.{}` was failed by {TARGETS_VAR}",
+                    "Injected error: `{}.{}` was failed by {source}",
                     info.parent_type, info.name
                 ),
                 Some(pos),
